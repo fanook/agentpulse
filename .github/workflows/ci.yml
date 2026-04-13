@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift / Xcode version
+        run: |
+          swift --version
+          xcodebuild -version || true
+
+      - name: Swift build (debug)
+        run: swift build
+
+      - name: Swift test
+        run: swift test --parallel
+
+      - name: Package AgentPulse.app (release)
+        run: ./scripts/make-app.sh
+
+      - name: Sanity-check the bundle
+        run: |
+          test -x build/AgentPulse.app/Contents/MacOS/AgentPulse
+          test -f build/AgentPulse.app/Contents/Info.plist
+          plutil -lint build/AgentPulse.app/Contents/Info.plist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentPulse.app
+          path: build/AgentPulse.app
+          retention-days: 7
+
+  hook-scripts:
+    runs-on: macos-15
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint bash hooks with shellcheck
+        run: |
+          brew install shellcheck >/dev/null
+          shellcheck hooks/claude/report.sh \
+                     hooks/claude/install.sh \
+                     hooks/claude/uninstall.sh \
+                     scripts/fake-claude.sh \
+                     scripts/make-app.sh
