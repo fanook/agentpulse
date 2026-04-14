@@ -112,11 +112,24 @@ struct PreferencesView: View {
             Circle()
                 .fill(hookStatusDot)
                 .frame(width: 7, height: 7)
-            Button(hookActionLabel) { runHookAction() }
-                .buttonStyle(.borderedProminent)
-                .tint(ClaudeTheme.coral)
-                .controlSize(.small)
-                .disabled(hookStatus == .noReportScript)
+            Group {
+                if hookStatus == .installed {
+                    // Disconnect is a "put down" action — don't make it
+                    // look urgent. Neutral bordered button for parity with
+                    // the dim green "connected" dot beside it.
+                    Button(hookActionLabel) { runHookAction() }
+                        .buttonStyle(.bordered)
+                        .tint(.gray)
+                } else {
+                    // Connect / Reconnect are the primary nudge for a
+                    // first-time user — keep them on-brand coral.
+                    Button(hookActionLabel) { runHookAction() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(ClaudeTheme.coral)
+                }
+            }
+            .controlSize(.small)
+            .disabled(hookStatus == .noReportScript)
         }
     }
 

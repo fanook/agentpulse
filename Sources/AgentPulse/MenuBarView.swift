@@ -56,6 +56,7 @@ struct MenuBarContent: View {
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     @State private var selection: Int = 0
+    @State private var hoveredIndex: Int? = nil
     @FocusState private var keyboardFocus: Bool
 
     private var sorted: [Session] {
@@ -188,14 +189,21 @@ struct MenuBarContent: View {
     // MARK: - List
 
     private var list: some View {
-        VStack(spacing: 1) {
+        VStack(spacing: 0) {
             ForEach(Array(sorted.enumerated()), id: \.element.id) { idx, session in
                 SessionRow(session: session,
                            age: ageText(session),
                            isSelected: idx == selection,
                            onJump: { Jumper.jump(to: session) },
                            onRemove: { store.remove(id: session.id) })
-                    .onHover { inside in if inside { selection = idx } }
+                    .onHover { inside in
+                        if inside {
+                            selection = idx
+                            hoveredIndex = idx
+                        } else if hoveredIndex == idx {
+                            hoveredIndex = nil
+                        }
+                    }
                     .contextMenu {
                         Button(L10n.jumpToTerminal) { Jumper.jump(to: session) }
                         Button(L10n.revealInFinder) { Jumper.revealInFinder(session) }
@@ -341,7 +349,7 @@ private struct SessionRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onJump)
         .onHover { isHovered = $0 }
-        .opacity(embedded && session.status == .idle ? 0.62 : 1.0)
+        .opacity(embedded && session.status == .idle ? 0.78 : 1.0)
     }
 
     /// Non-waiting rows use a two-line info hierarchy:
@@ -583,19 +591,21 @@ private struct SessionRow: View {
         return command
     }
 
+    /// Row backdrop: waiting rows get a soft coral wash; selection / hover
+    /// everything else gets a neutral cream tint.
     private var rowBackground: some View {
         ZStack {
             if session.status == .waiting {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(embedded ? ClaudeTheme.waitingWash : Color.orange.opacity(0.10))
             }
             if isSelected {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(embedded ? ClaudeTheme.selectionWash : Color.gray.opacity(0.18))
             }
             if isHovered && !isSelected && session.status != .waiting {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(embedded ? ClaudeTheme.creamSubtle.opacity(0.55) : Color.clear)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(embedded ? ClaudeTheme.creamSubtle.opacity(0.4) : Color.clear)
             }
         }
     }
