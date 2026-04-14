@@ -20,6 +20,11 @@ struct TerminalHint: Codable, Sendable, Equatable {
     var tty: String?                  // best-effort tty path
 }
 
+struct PendingTool: Codable, Sendable, Equatable {
+    var name: String                  // "Bash", "Edit", "Write", "Read", ...
+    var summary: String               // one-line preview of the input (e.g. "rm -rf /tmp/foo")
+}
+
 struct Session: Codable, Sendable, Identifiable {
     var id: String                    // session_id from the agent
     var agent: String?                // "claude", "aider", "gemini", ... nil = unknown
@@ -32,6 +37,7 @@ struct Session: Codable, Sendable, Identifiable {
     var terminal: TerminalHint?
     var activity: String?             // "Bash", "Edit foo.ts", ... set by PreToolUse, cleared by PostToolUse/Stop
     var customTitle: String?          // user-assigned label (e.g. from Claude's /rename)
+    var pendingTool: PendingTool?     // populated when status == .waiting (from transcript scan)
 
     var displayName: String {
         if let t = customTitle, !t.isEmpty { return t }

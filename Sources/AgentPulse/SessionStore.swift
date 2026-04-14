@@ -41,6 +41,21 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    private func refreshPendingTool(for sessionId: String, path: String?) {
+        guard let path, !path.isEmpty else { return }
+        Task.detached {
+            guard let tool = PendingToolScanner.scanLastToolUse(at: path) else { return }
+            await MainActor.run {
+                guard let i = self.sessions.firstIndex(where: { $0.id == sessionId }),
+                      self.sessions[i].status == .waiting,
+                      self.sessions[i].pendingTool != tool
+                else { return }
+                self.sessions[i].pendingTool = tool
+                self.save()
+            }
+        }
+    }
+
     private func refreshCustomTitle(for sessionId: String, path: String?) {
         guard let path, !path.isEmpty else { return }
         let now = Date()
@@ -196,6 +211,7 @@ final class SessionStore: ObservableObject {
                 sessions[i].status = .idle
                 sessions[i].lastNotification = nil
                 sessions[i].activity = nil
+                sessions[i].pendingTool = nil
                 sessions[i].updatedAt = now
             } else {
                 // Unknown session — create a placeholder so user sees it.
@@ -221,6 +237,11 @@ final class SessionStore: ObservableObject {
                 sessions[i].status = newStatus
                 sessions[i].lastNotification = event.notificationType
                 sessions[i].updatedAt = now
+                if newStatus == .waiting {
+                    refreshPendingTool(for: event.sessionId, path: sessions[i].transcriptPath)
+                } else {
+                    sessions[i].pendingTool = nil
+                }
             } else {
                 sessions.append(Session(
                     id: event.sessionId,
@@ -233,6 +254,9 @@ final class SessionStore: ObservableObject {
                     transcriptPath: event.transcriptPath,
                     terminal: event.terminal
                 ))
+                if newStatus == .waiting {
+                    refreshPendingTool(for: event.sessionId, path: event.transcriptPath)
+                }
             }
 
         case "UserPromptSubmit":
@@ -259,6 +283,7 @@ final class SessionStore: ObservableObject {
                 let label = [event.toolName, event.toolSummary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
                 sessions[i].activity = label.isEmpty ? nil : label
                 sessions[i].status = .running
+                sessions[i].pendingTool = nil
                 sessions[i].updatedAt = now
             }
 
@@ -269,6 +294,7 @@ final class SessionStore: ObservableObject {
                 // the next tool call — show that as thinking rather than
                 // leaving the old "running" label stuck.
                 sessions[i].status = .thinking
+                sessions[i].pendingTool = nil
                 sessions[i].updatedAt = now
             }
 

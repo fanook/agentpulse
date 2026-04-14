@@ -6,6 +6,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Version precedence: explicit env → current git tag → short sha → "dev".
+# make-dmg.sh / release CI pass VERSION in; local `./scripts/make-app.sh`
+# picks it up automatically so the About pane stays in sync with the DMG.
+if [ -z "${VERSION:-}" ]; then
+    if TAG="$(git describe --tags --exact-match HEAD 2>/dev/null)"; then
+        VERSION="${TAG#v}"
+    elif SHA="$(git rev-parse --short HEAD 2>/dev/null)"; then
+        VERSION="dev-$SHA"
+    else
+        VERSION="dev"
+    fi
+fi
+export VERSION
+echo "version: $VERSION"
+
 echo "building release..."
 swift build -c release
 
@@ -18,6 +33,12 @@ mkdir -p "$APP/Contents/Resources"
 
 cp "$EXE" "$APP/Contents/MacOS/AgentPulse"
 chmod +x "$APP/Contents/MacOS/AgentPulse"
+
+# Ship the Claude Code hook bridge inside the bundle so users installed
+# via the DMG can wire it up from the Settings pane without ever touching
+# a shell. HookInstaller.swift reads this via Bundle.main.
+cp "$ROOT/hooks/claude/report.sh" "$APP/Contents/Resources/report.sh"
+chmod +x "$APP/Contents/Resources/report.sh"
 
 # Prefer the checked-in icon. If it's missing (fresh clone that deleted
 # Resources, CI without the asset, etc.) regenerate with the helper.
@@ -38,8 +59,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>AgentPulse</string>
     <key>CFBundleDisplayName</key><string>AgentPulse</string>
     <key>CFBundleIdentifier</key><string>local.agentpulse.menubar</string>
-    <key>CFBundleVersion</key><string>0.1</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
     <key>CFBundleExecutable</key><string>AgentPulse</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -49,6 +70,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Swap the placeholder with the resolved version so the About pane shows
+# the same string that appears in the DMG filename.
+/usr/bin/sed -i '' "s/__VERSION__/$VERSION/g" "$APP/Contents/Info.plist"
 
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
 

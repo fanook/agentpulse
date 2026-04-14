@@ -1,0 +1,56 @@
+name: Release
+
+# Push a semver tag (e.g. `v0.1.0`) to publish a DMG on the matching
+# GitHub Release. The DMG is unsigned — first-launch on another Mac
+# requires the right-click → Open workaround documented in the README.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write    # needed to attach assets to the release
+
+jobs:
+  build-dmg:
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # `git describe --tags` needs history
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
+
+      - name: Build DMG
+        run: ./scripts/make-dmg.sh
+
+      - name: Compute release name
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          DMG=$(ls build/AgentPulse-*.dmg)
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "dmg_basename=$(basename "$DMG")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: AgentPulse ${{ steps.meta.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            Drag-to-install DMG below.
+
+            > First launch on a fresh Mac will show a Gatekeeper warning
+            > because the bundle isn't signed. Right-click (or ⌃-click)
+            > the app in `/Applications`, choose **Open**, then confirm
+            > once — macOS will remember the choice.
+
+            See the README's [install](https://github.com/${{ github.repository }}#install) section for the scripted alternative.
+          files: ${{ steps.meta.outputs.dmg }}

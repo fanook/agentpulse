@@ -1,37 +1,32 @@
 import SwiftUI
 import AppKit
-import UserNotifications
 import ServiceManagement
 import Combine
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let store = SessionStore()
     private var server: HTTPServer?
-    private var lastNotified: [String: Date] = [:]
-    private let notifyCooldown: TimeInterval = 60
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
     private var storeObserver: AnyCancellable?
     private var eventMonitor: Any?
+    private var keyMonitor: Any?
+    private var localKeyMonitor: Any?
+    private var notchPresenter: NotchPresenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        if Bundle.main.bundleIdentifier != nil {
-            let center = UNUserNotificationCenter.current()
-            center.delegate = self
-            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        }
         setupStatusItem()
         startServer()
+        notchPresenter = NotchPresenter(store: store)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         Runtime.clearPortFile()
     }
 
-    // MARK: - Menu bar item + popover
+    // MARK: - Menu bar item
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -42,24 +37,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, UNUs
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-
-        popover = NSPopover()
-        popover.contentSize = NSSize(width: 440, height: 320)
-        // `.applicationDefined` keeps the popover open when focus jumps to
-        // iTerm / JetBrains after clicking a row, so users can keep
-        // arrow-key / click-hopping between sessions. We close it manually
-        // on Esc, outside click, or a second tap of the menu bar icon.
-        popover.behavior = .applicationDefined
-        popover.animates = true
-
-        // NSPopover windows are inactive-by-default; without acceptsFirstMouse
-        // the OS eats the first click as an "activation" tap and users have
-        // to click twice to hit a row. Wrap the SwiftUI view in a host that
-        // claims first mouse, so every click is a real click.
-        let hosting = FirstMouseHostingView(rootView: MenuBarContent(store: store))
-        let vc = NSViewController()
-        vc.view = hosting
-        popover.contentViewController = vc
 
         // Re-render icon whenever session state changes.
         storeObserver = store.objectWillChange
@@ -155,44 +132,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, UNUs
     }
 
     private func togglePopover() {
-        if popover.isShown {
-            closePopover()
+        // The capsule is always the menu-bar action target; autoPop only
+        // gates whether *new* waiting events pop it unprompted.
+        guard let presenter = notchPresenter else { return }
+        if presenter.isSummoned {
+            presenter.dismiss()
+            removeOutsideMonitor()
         } else {
-            showPopover()
+            NSApp.activate(ignoringOtherApps: true)
+            presenter.summon()
+            installOutsideMonitor()
         }
     }
 
-    private func showPopover() {
-        guard let button = statusItem.button else { return }
-        // Activate the app (even though it's .accessory) so the popover
-        // window is already key when it appears. Without this, macOS
-        // swallows the first click as an "activation" tap and users have
-        // to click twice to actually hit a row.
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKeyAndOrderFront(nil)
-
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.closePopover() }
+    private func installOutsideMonitor() {
+        if eventMonitor == nil {
+            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                Task { @MainActor in self?.dismissNotch() }
+            }
+        }
+        // Esc anywhere — global catches focus in another app, local catches it
+        // when something inside our process happens to be key.
+        if keyMonitor == nil {
+            keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+                if event.keyCode == 53 {
+                    Task { @MainActor in self?.dismissNotch() }
+                }
+            }
+        }
+        if localKeyMonitor == nil {
+            localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+                if event.keyCode == 53 {
+                    Task { @MainActor in self?.dismissNotch() }
+                    return nil
+                }
+                return event
+            }
         }
     }
 
-    private func closePopover() {
-        if popover.isShown { popover.performClose(nil) }
-        if let mon = eventMonitor {
-            NSEvent.removeMonitor(mon)
-            eventMonitor = nil
-        }
+    private func removeOutsideMonitor() {
+        if let mon = eventMonitor    { NSEvent.removeMonitor(mon); eventMonitor = nil }
+        if let mon = keyMonitor      { NSEvent.removeMonitor(mon); keyMonitor = nil }
+        if let mon = localKeyMonitor { NSEvent.removeMonitor(mon); localKeyMonitor = nil }
+    }
+
+    private func dismissNotch() {
+        notchPresenter?.dismiss()
+        removeOutsideMonitor()
     }
 
     private func showContextMenu() {
         let menu = NSMenu()
+        let settings = NSMenuItem(title: L10n.settings, action: #selector(openPreferences), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        let about = NSMenuItem(title: L10n.about, action: #selector(openAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: L10n.quit, action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+    }
+
+    @objc private func openPreferences() {
+        summonCapsule(on: .preferences)
+    }
+
+    @objc private func openAbout() {
+        summonCapsule(on: .about)
+    }
+
+    private func summonCapsule(on screen: NotchScreen) {
+        guard let presenter = notchPresenter else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        presenter.summon(on: screen)
+        installOutsideMonitor()
     }
 
     @objc private func quit() {
@@ -219,45 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, UNUs
     }
 
     private func handle(_ event: HookEvent) {
-        let before = store.sessions.first(where: { $0.id == event.sessionId })?.status
         store.apply(event)
-        let after = store.sessions.first(where: { $0.id == event.sessionId })?.status
-
-        if after == .waiting && before != .waiting {
-            let now = Date()
-            if let last = lastNotified[event.sessionId],
-               now.timeIntervalSince(last) < notifyCooldown {
-                return
-            }
-            lastNotified[event.sessionId] = now
-            if let session = store.sessions.first(where: { $0.id == event.sessionId }) {
-                Notifier.notifyWaiting(session: session)
-            }
-        }
-
-        if after != .waiting {
-            lastNotified[event.sessionId] = nil
-        }
-    }
-
-    // MARK: - UNUserNotificationCenterDelegate
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                            willPresent notification: UNNotification,
-                                            withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
-    }
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                            didReceive response: UNNotificationResponse,
-                                            withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
-        let userInfo = response.notification.request.content.userInfo
-        Task { @MainActor in
-            defer { completionHandler() }
-            guard let sid = userInfo["sessionId"] as? String,
-                  let session = self.store.sessions.first(where: { $0.id == sid }) else { return }
-            Jumper.jump(to: session)
-        }
     }
 }
 
@@ -266,66 +247,10 @@ struct AgentPulseApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
+        // We open Preferences through our own NSWindow (see AppDelegate);
+        // the Settings scene stays here only to keep the SwiftUI lifecycle
+        // quiet — we deliberately don't route through it.
         Settings { EmptyView() }
     }
 }
 
-/// Hosting view that lets every click land on its SwiftUI content even when
-/// the popover window isn't the key window — avoiding the macOS "first
-/// mouse swallowed" behavior.
-final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
-enum Notifier {
-    static func notifyWaiting(session: Session) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-
-        let content = UNMutableNotificationContent()
-
-        // ── Title ── session identifier the user recognizes first.
-        // Include the dir when a custom title is set so project context
-        // isn't lost.
-        let dir = URL(fileURLWithPath: session.cwd).lastPathComponent
-        if let title = session.customTitle, !title.isEmpty, title != dir {
-            content.title = "\(title) · \(dir)"
-        } else {
-            content.title = session.displayName
-        }
-
-        // ── Body ── action, then agent + terminal trailing as context.
-        var parts: [String] = [L10n.notificationPermissionLine, L10n.agentDisplayName(session.agent)]
-        if let source = sourceLabel(for: session) { parts.append(source) }
-        content.body = parts.joined(separator: " · ")
-
-        content.sound = .default
-        content.userInfo = ["sessionId": session.id]
-        let req = UNNotificationRequest(identifier: "pulse.\(session.id).\(Date().timeIntervalSince1970)",
-                                        content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(req)
-    }
-
-    private static func sourceLabel(for session: Session) -> String? {
-        guard let t = session.terminal else { return nil }
-        if let app = t.hostApp, !app.isEmpty { return app }
-        if let bid = t.bundleIdentifier?.lowercased(), bid.contains("jetbrains") {
-            if bid.contains("goland")   { return "GoLand" }
-            if bid.contains("intellij") { return "IntelliJ" }
-            if bid.contains("pycharm")  { return "PyCharm" }
-            if bid.contains("webstorm") { return "WebStorm" }
-            if bid.contains("rider")    { return "Rider" }
-            if bid.contains("clion")    { return "CLion" }
-            return "JetBrains"
-        }
-        if let emu = t.terminalEmulator, emu.lowercased().contains("jetbrains") {
-            return "JetBrains"
-        }
-        if let p = t.termProgram {
-            if p.contains("iTerm")          { return "iTerm" }
-            if p.contains("Apple_Terminal") { return "Terminal" }
-            if p == "vscode"                { return "VS Code" }
-            return p
-        }
-        return nil
-    }
-}

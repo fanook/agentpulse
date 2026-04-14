@@ -7,9 +7,15 @@ let package = Package(
     products: [
         .executable(name: "agentpulse", targets: ["AgentPulse"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/MrKai77/DynamicNotchKit.git", from: "1.1.0")
+    ],
     targets: [
         .executableTarget(
             name: "AgentPulse",
+            dependencies: [
+                .product(name: "DynamicNotchKit", package: "DynamicNotchKit")
+            ],
             path: "Sources/AgentPulse"
         ),
         .testTarget(
