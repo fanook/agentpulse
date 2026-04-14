@@ -13,7 +13,10 @@ permissions:
 
 jobs:
   build-dmg:
-    runs-on: macos-14
+    # macos-15 (Sequoia) ships Xcode 16 / Swift 6, which DynamicNotchKit
+    # (swift-tools-version: 6.0) needs. macos-14 defaults to Xcode 15 /
+    # Swift 5.10 and fails dependency resolution.
+    runs-on: macos-15
     timeout-minutes: 15
 
     steps:
@@ -21,8 +24,11 @@ jobs:
         with:
           fetch-depth: 0   # `git describe --tags` needs history
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
+      - name: Report toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
 
       - name: Build DMG
         run: ./scripts/make-dmg.sh
