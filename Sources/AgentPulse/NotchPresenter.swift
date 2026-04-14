@@ -14,7 +14,9 @@ import DynamicNotchKit
 @MainActor
 final class NotchPresenter {
     private let store: SessionStore
-    private let viewModel = NotchViewModel()
+    /// Exposed so AppDelegate can subscribe to `$capsuleVisible` and toggle
+    /// the global outside-click monitor without owning that logic itself.
+    let viewModel = NotchViewModel()
 
     private var notch: DynamicNotch<NotchExpandedView, NotchCompactLeadingView, NotchCompactTrailingView>?
     private var storeObserver: AnyCancellable?
@@ -59,20 +61,23 @@ final class NotchPresenter {
     func summon(on screen: NotchScreen = .sessions) {
         viewModel.screen = screen
         viewModel.summoned = true
+        viewModel.capsuleVisible = true
         revertTask?.cancel()
         ensureNotch()
         guard let notch else { return }
         Task { await notch.expand() }
     }
 
+    /// Dismiss whatever is currently visible — covers both manual summons
+    /// and auto-popped capsules. Idempotent.
     func dismiss() {
-        guard viewModel.summoned else { return }
+        let wasVisible = viewModel.capsuleVisible
         viewModel.summoned = false
         viewModel.screen = .sessions
+        viewModel.capsuleVisible = false
         revertTask?.cancel()
-        // Manual dismiss always collapses the capsule even if a waiting
-        // session is still pending — the user has explicitly acknowledged
-        // it. A brand-new waiting event will pop it back up (refresh()
+        guard wasVisible else { return }
+        // A brand-new waiting event will pop it back up (refresh()
         // compares against lastSnapshot to detect that).
         if hasNotch {
             let snap = lastSnapshot
@@ -119,6 +124,7 @@ final class NotchPresenter {
     private func teardownNotch() {
         revertTask?.cancel()
         hoverObserver = nil
+        viewModel.capsuleVisible = false
         let dying = notch
         notch = nil
         Task { await dying?.hide() }
@@ -151,6 +157,11 @@ final class NotchPresenter {
         }
     }
 
+    /// Auto-pop duration in seconds; `0` means "stay open until dismissed".
+    private var autoPopDuration: Int {
+        UserDefaults.intWithDefault(PrefKey.autoPopDurationSeconds, default: 5)
+    }
+
     /// Notched MacBook: keep a compact pill at the notch whenever there is any
     /// session, expand on hover or on a new waiting event.
     private func refreshNotchedDisplay(snap: NotchSnapshot, prev: NotchSnapshot, newWaiting: Bool) {
@@ -164,6 +175,7 @@ final class NotchPresenter {
 
         if viewModel.summoned {
             // Sticky summoned state — stay expanded.
+            viewModel.capsuleVisible = true
             Task { await notch.expand() }
             return
         }
@@ -174,11 +186,17 @@ final class NotchPresenter {
 
         if newWaiting {
             revertTask?.cancel()
-            revertTask = Task {
+            viewModel.capsuleVisible = true
+            let duration = autoPopDuration
+            revertTask = Task { [weak self] in
                 await notch.expand()
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled else { return }
-                if !notch.isHovering && !self.viewModel.summoned { await notch.compact() }
+                guard duration > 0 else { return }
+                try? await Task.sleep(for: .seconds(duration))
+                guard !Task.isCancelled, let self else { return }
+                if !notch.isHovering && !self.viewModel.summoned {
+                    self.viewModel.capsuleVisible = false
+                    await notch.compact()
+                }
             }
         }
     }
@@ -197,14 +215,18 @@ final class NotchPresenter {
         ensureNotch()
         guard let notch else { return }
 
+        viewModel.capsuleVisible = true
         Task { await notch.expand() }
 
         // Auto-pop from a new waiting event collapses on a timer unless the
-        // user manually pinned it open by clicking AP.
+        // user manually pinned it open by clicking AP — or chose "Until
+        // dismissed" in Settings.
         if newWaiting && !viewModel.summoned {
             revertTask?.cancel()
+            let duration = autoPopDuration
+            guard duration > 0 else { return }
             revertTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(duration))
                 guard !Task.isCancelled, let self,
                       !self.viewModel.summoned
                 else { return }
@@ -226,6 +248,10 @@ enum NotchScreen: Equatable {
 final class NotchViewModel: ObservableObject {
     @Published var snapshot: NotchSnapshot = .empty
     @Published var summoned: Bool = false
+    /// True whenever the expanded capsule is on-screen (regardless of
+    /// whether it got there by a manual summon or by an auto-pop). Drives
+    /// AppDelegate's outside-click monitor lifecycle.
+    @Published var capsuleVisible: Bool = false
     @Published var screen: NotchScreen = .sessions
     weak var store: SessionStore?
     var onJump: ((String) -> Void)?

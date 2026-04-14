@@ -14,12 +14,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var keyMonitor: Any?
     private var localKeyMonitor: Any?
     private var notchPresenter: NotchPresenter?
+    private var capsuleVisibilityObserver: AnyCancellable?
+    private var prefObserver: AnyCancellable?
+    private var lastCapsuleVisible: Bool = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
         startServer()
-        notchPresenter = NotchPresenter(store: store)
+        let presenter = NotchPresenter(store: store)
+        notchPresenter = presenter
+
+        // Install the outside-click + Esc monitors whenever the capsule is
+        // expanded and the user hasn't turned that behavior off.
+        capsuleVisibilityObserver = presenter.viewModel.$capsuleVisible
+            .receive(on: RunLoop.main)
+            .sink { [weak self] visible in
+                self?.lastCapsuleVisible = visible
+                self?.syncOutsideMonitors()
+            }
+        // React live when the user flips the "Dismiss on outside click" toggle.
+        prefObserver = NotificationCenter.default
+            .publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncOutsideMonitors()
+            }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -132,35 +152,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func togglePopover() {
-        // The capsule is always the menu-bar action target; autoPop only
-        // gates whether *new* waiting events pop it unprompted.
+        // The capsule is always the menu-bar action target; the outside-click
+        // monitor installs automatically via the capsuleVisible subscription.
         guard let presenter = notchPresenter else { return }
         if presenter.isSummoned {
             presenter.dismiss()
-            removeOutsideMonitor()
         } else {
             NSApp.activate(ignoringOtherApps: true)
             presenter.summon()
-            installOutsideMonitor()
         }
     }
 
-    private func installOutsideMonitor() {
-        if eventMonitor == nil {
+    /// Single source of truth for whether the outside-click / Esc monitors
+    /// should be live — driven by the capsule's current visibility and the
+    /// user's "Dismiss on outside click" preference.
+    private func syncOutsideMonitors() {
+        let dismissEnabled = UserDefaults.boolWithDefault(PrefKey.dismissOnOutsideClick)
+        // Esc should ALWAYS work while the capsule is visible (documented).
+        // Only the *mouse* monitor honors the toggle.
+        let wantKey   = lastCapsuleVisible
+        let wantMouse = lastCapsuleVisible && dismissEnabled
+
+        if wantMouse, eventMonitor == nil {
             eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
                 Task { @MainActor in self?.dismissNotch() }
             }
+        } else if !wantMouse, let mon = eventMonitor {
+            NSEvent.removeMonitor(mon); eventMonitor = nil
         }
-        // Esc anywhere — global catches focus in another app, local catches it
-        // when something inside our process happens to be key.
-        if keyMonitor == nil {
+
+        if wantKey, keyMonitor == nil {
             keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-                if event.keyCode == 53 {
-                    Task { @MainActor in self?.dismissNotch() }
-                }
+                if event.keyCode == 53 { Task { @MainActor in self?.dismissNotch() } }
             }
+        } else if !wantKey, let mon = keyMonitor {
+            NSEvent.removeMonitor(mon); keyMonitor = nil
         }
-        if localKeyMonitor == nil {
+
+        if wantKey, localKeyMonitor == nil {
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
                 if event.keyCode == 53 {
                     Task { @MainActor in self?.dismissNotch() }
@@ -168,18 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 }
                 return event
             }
+        } else if !wantKey, let mon = localKeyMonitor {
+            NSEvent.removeMonitor(mon); localKeyMonitor = nil
         }
-    }
-
-    private func removeOutsideMonitor() {
-        if let mon = eventMonitor    { NSEvent.removeMonitor(mon); eventMonitor = nil }
-        if let mon = keyMonitor      { NSEvent.removeMonitor(mon); keyMonitor = nil }
-        if let mon = localKeyMonitor { NSEvent.removeMonitor(mon); localKeyMonitor = nil }
     }
 
     private func dismissNotch() {
         notchPresenter?.dismiss()
-        removeOutsideMonitor()
+        // syncOutsideMonitors fires automatically via the capsuleVisible subscription.
     }
 
     private func showContextMenu() {
@@ -211,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard let presenter = notchPresenter else { return }
         NSApp.activate(ignoringOtherApps: true)
         presenter.summon(on: screen)
-        installOutsideMonitor()
+        // Monitors install themselves via the capsuleVisible subscription.
     }
 
     @objc private func quit() {

@@ -5,7 +5,13 @@ import ServiceManagement
 /// Centralized keys so AppDelegate / NotchPresenter can read the same
 /// defaults the preferences pane writes.
 enum PrefKey {
-    static let autoPopOnWaiting = "pref.autoPopOnWaiting"
+    static let autoPopOnWaiting       = "pref.autoPopOnWaiting"
+    /// Seconds the auto-popped capsule stays expanded before collapsing.
+    /// `0` is the sentinel for "keep open until the user dismisses".
+    static let autoPopDurationSeconds = "pref.autoPopDurationSeconds"
+    /// When `true`, clicking anywhere outside the expanded capsule
+    /// closes it — applies both to manual summons and to auto-pops.
+    static let dismissOnOutsideClick  = "pref.dismissOnOutsideClick"
 }
 
 extension UserDefaults {
@@ -14,6 +20,14 @@ extension UserDefaults {
     static func boolWithDefault(_ key: String, default defaultValue: Bool = true) -> Bool {
         if standard.object(forKey: key) == nil { return defaultValue }
         return standard.bool(forKey: key)
+    }
+
+    /// `default` when nothing has been written, otherwise the stored int.
+    /// Avoids the standard `integer(forKey:)` ambiguity where a missing
+    /// key and an explicit `0` both return `0`.
+    static func intWithDefault(_ key: String, default defaultValue: Int) -> Int {
+        if standard.object(forKey: key) == nil { return defaultValue }
+        return standard.integer(forKey: key)
     }
 }
 
@@ -25,9 +39,12 @@ struct PreferencesView: View {
     var onBack: (() -> Void)? = nil
 
     @State private var launchAtLogin: Bool = false
-    @AppStorage(PrefKey.autoPopOnWaiting) private var autoPop: Bool = true
+    @AppStorage(PrefKey.autoPopOnWaiting)       private var autoPop: Bool = true
+    @AppStorage(PrefKey.autoPopDurationSeconds) private var autoPopDuration: Int = 5
+    @AppStorage(PrefKey.dismissOnOutsideClick)  private var dismissOnOutside: Bool = true
     @State private var hookStatus: HookInstaller.Status = .notInstalled
     @State private var hookError: String? = nil
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -51,8 +68,15 @@ struct PreferencesView: View {
                                 .onChange(of: launchAtLogin) { _, new in applyLaunchAtLogin(new) })
                     CardDivider()
                     PrefRow(title: "Auto-open capsule when waiting",
-                            subtitle: "Pop the expanded view for 5 s on a new permission prompt.",
+                            subtitle: "Pop the capsule down on a new permission prompt.",
                             trailing: Toggle("", isOn: $autoPop).labelsHidden())
+                    if autoPop {
+                        durationSubRow
+                    }
+                    CardDivider()
+                    PrefRow(title: "Dismiss when clicking outside",
+                            subtitle: "Click anywhere off the capsule to close it. Esc always closes.",
+                            trailing: Toggle("", isOn: $dismissOnOutside).labelsHidden())
                 }
             }
             .padding(.horizontal, 14)
@@ -64,6 +88,65 @@ struct PreferencesView: View {
         .onAppear {
             refreshLaunchAtLogin()
             refreshHookStatus()
+        }
+    }
+
+    // MARK: - Auto-open duration sub-row
+
+    /// Secondary control under the Auto-open toggle. Uses a cream chip
+    /// menu to match the LinkChip look from the About screen instead of
+    /// the default macOS Picker style, which clashed with the card bg.
+    private var durationSubRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(ClaudeTheme.inkFaint)
+                Text("Stay open for")
+                    .font(.system(.callout, design: .rounded))
+                    .foregroundStyle(ClaudeTheme.inkMuted)
+            }
+            Spacer(minLength: 8)
+            Menu {
+                Button("3 seconds")   { autoPopDuration = 3  }
+                Button("5 seconds")   { autoPopDuration = 5  }
+                Button("10 seconds")  { autoPopDuration = 10 }
+                Button("15 seconds")  { autoPopDuration = 15 }
+                Divider()
+                Button("Until dismissed") { autoPopDuration = 0 }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(autoPopDurationLabel)
+                        .font(.system(.caption, design: .rounded, weight: .medium))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .foregroundStyle(ClaudeTheme.ink)
+                .background(
+                    Capsule().fill(ClaudeTheme.creamSubtle.opacity(0.7))
+                )
+                .overlay(
+                    Capsule().strokeBorder(ClaudeTheme.creamSubtle, lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.leading, 4)
+    }
+
+    private var autoPopDurationLabel: String {
+        switch autoPopDuration {
+        case 0:  return "Until dismissed"
+        case 3:  return "3 seconds"
+        case 5:  return "5 seconds"
+        case 10: return "10 seconds"
+        case 15: return "15 seconds"
+        default: return "\(autoPopDuration) seconds"
         }
     }
 
@@ -125,7 +208,7 @@ struct PreferencesView: View {
                     // first-time user — keep them on-brand coral.
                     Button(hookActionLabel) { runHookAction() }
                         .buttonStyle(.borderedProminent)
-                        .tint(ClaudeTheme.coral)
+                        .tint(ClaudeTheme.coralStatic(for: scheme))
                 }
             }
             .controlSize(.small)
@@ -322,6 +405,7 @@ private struct PrefRow<Trailing: View>: View {
     let title: String
     let subtitle: String?
     let trailing: Trailing
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -338,9 +422,41 @@ private struct PrefRow<Trailing: View>: View {
                 }
             }
             Spacer(minLength: 8)
-            trailing
-                .tint(ClaudeTheme.coral)
+            // Use our own ToggleStyle (ignored by non-Toggle trailing
+            // views) so the "on" state draws with our coral instead of
+            // whichever system accent the user has set. SwiftUI's
+            // `.tint()` is unreliable inside DynamicNotchKit's non-
+            // activating NSPanel.
+            trailing.toggleStyle(CoralToggleStyle(color: ClaudeTheme.coralStatic(for: scheme)))
         }
+    }
+}
+
+/// Hand-rolled iOS-style switch so the filled-track color is Claude coral
+/// regardless of the system accent color or the NSPanel's activation state.
+struct CoralToggleStyle: ToggleStyle {
+    let color: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(configuration.isOn
+                          ? color
+                          : ClaudeTheme.inkFaint.opacity(0.28))
+                    .frame(width: 34, height: 20)
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 16, height: 16)
+                    .shadow(color: .black.opacity(0.15), radius: 1, y: 0.5)
+                    .padding(2)
+            }
+            .animation(.spring(response: 0.2, dampingFraction: 0.8), value: configuration.isOn)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
     }
 }
 

@@ -42,6 +42,16 @@ enum ClaudeTheme {
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
         })
     }
+
+    /// Scheme-resolved coral for places where the dynamic NSColor gets
+    /// cached with the wrong variant on first render (e.g. SwiftUI
+    /// `.tint()` inside DynamicNotchKit's NSPanel). Callers that read
+    /// `@Environment(\.colorScheme)` should use this instead of `.coral`.
+    static func coralStatic(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.910, green: 0.520, blue: 0.385)
+            : Color(red: 0.835, green: 0.420, blue: 0.290)
+    }
 }
 
 struct MenuBarContent: View {
